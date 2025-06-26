@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-winit = "0.29"
+winit = "0.30"
 global-hotkey = "0.7.0"
-notify = "6.0.0"
+notify = "8.0.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 dirs = "6.0"
@@ -20,5 +20,5 @@ strum = "0.27.1"
 strum_macros = "0.27.1"
 lazy_static = "1.4.0"
 parking_lot = "0.12.1"
-tray-icon = "0.6.0"
+tray-icon = "0.21.0"
 shortcuts-rs = "1.1.1"

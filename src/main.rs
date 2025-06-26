@@ -10,9 +10,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use winit::event::Event as WinitEvent;
-use winit::event_loop::{ControlFlow, EventLoopBuilder};
-use tray_icon::{menu::{Menu, MenuItem, MenuEvent}, TrayIconBuilder, TrayEvent};
+
+use winit::event_loop::{ControlFlow, EventLoop, ActiveEventLoop};
+use winit::application::ApplicationHandler;
+use tray_icon::{menu::{Menu, MenuItem, MenuEvent, MenuId}, TrayIconBuilder, TrayIconEvent, Icon};
 
 #[derive(Debug, Deserialize, Clone)]
 struct Config {
@@ -30,6 +31,87 @@ enum UserEvent {
     ConfigChanged,
 }
 
+
+
+struct App {
+    manager: GlobalHotKeyManager,
+    hotkeys_map: HashMap<u32, (HotKey, String)>,
+    config_path: PathBuf,
+    quit_item_id: MenuId,
+}
+
+impl ApplicationHandler<UserEvent> for App {
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::ConfigChanged => {
+                info!("Config file changed. Reloading hotkeys...");
+                let keys_to_unregister: Vec<HotKey> = self.hotkeys_map.values().map(|(k, _)| *k).collect();
+                if !keys_to_unregister.is_empty() {
+                    if let Err(e) = self.manager.unregister_all(&keys_to_unregister) {
+                        error!("Failed to unregister all hotkeys: {}", e);
+                    }
+                }
+                self.hotkeys_map.clear();
+                if let Err(e) = load_and_register_hotkeys(&self.manager, &mut self.hotkeys_map, &self.config_path) {
+                    error!("Failed to reload and register hotkeys: {}", e);
+                }
+            }
+        }
+    }
+
+    fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
+        // This is where you'd typically create windows, but we don't have any.
+        // We need to ensure the event loop stays alive.
+    }
+
+    fn window_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _window_id: winit::window::WindowId,
+        _event: winit::event::WindowEvent,
+    ) {
+        // No windows in this application, so nothing to do here.
+    }
+
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, _cause: winit::event::StartCause) {
+        event_loop.set_control_flow(ControlFlow::Wait);
+
+        if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+            if event.state == HotKeyState::Pressed {
+                if let Some((_, path)) = self.hotkeys_map.get(&event.id) {
+                    info!("Hotkey {} pressed, opening: {}", event.id, path);
+                    if let Err(e) = open::that(path) {
+                        error!("Failed to open path \'{}\': {}", path, e);
+                    }
+                }
+            }
+        }
+        if let Ok(event) = TrayIconEvent::receiver().try_recv() {
+            info!("Tray event received: {:?}, quit_item id: {:?}", event, self.quit_item_id);
+            if event.id().0 == self.quit_item_id.0 {
+                info!("Quit item clicked, exiting application.");
+                event_loop.exit();
+            }
+        }
+        if let Ok(event) = MenuEvent::receiver().try_recv() {
+            info!("Menu event received: {:?}, quit_item id: {:?}", event, self.quit_item_id);
+            if *event.id() == self.quit_item_id {
+                info!("Quit item clicked, exiting application.");
+                event_loop.exit();
+            }
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        // This is called when the event loop is about to go to sleep until new events arrive.
+        // We can use this to poll for events from other sources.
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        info!("Exiting application.");
+    }
+}
+
 fn main() -> Result<()> {
     SimpleLogger::new()
         .with_level(LevelFilter::Info)
@@ -38,11 +120,37 @@ fn main() -> Result<()> {
 
     create_startup_shortcut().context("Failed to create startup shortcut")?;
 
-    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build()?;
-    let proxy = event_loop.create_proxy();
+    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let manager = GlobalHotKeyManager::new().context("Failed to create hotkey manager")?;
     let mut hotkeys_map: HashMap<u32, (HotKey, String)> = HashMap::new();
 
+    let config_path = get_config_path()?;
+    load_and_register_hotkeys(&manager, &mut hotkeys_map, &config_path)?;
+
+    let tray_menu = Menu::new();
+    let quit_item = MenuItem::new("Quit", true, None);
+    let quit_item_id = quit_item.id();
+    let _ = tray_menu.append_items(&[&quit_item]);
+
+    let icon_bytes = include_bytes!("../assets/icon.ico");
+    let icon = Icon::from_buffer(icon_bytes.to_vec()).context("Failed to create icon from bytes")?;
+
+    let _tray_icon = Some(TrayIconBuilder::new()
+        .with_menu(Box::new(tray_menu))
+        .with_tooltip("Windows Shortcuts")
+        .with_icon(icon)
+        .build()?);
+
+    info!("Listening for hotkeys and config changes...");
+
+    let mut app = App {
+        manager,
+        hotkeys_map,
+        config_path: config_path.clone(),
+        quit_item_id: quit_item_id.clone(),
+    };
+
+    let proxy = event_loop.create_proxy();
     let mut watcher = recommended_watcher(move |res| {
         if let Ok(Event { kind, .. }) = res {
             if kind.is_modify() || kind.is_create() {
@@ -50,75 +158,11 @@ fn main() -> Result<()> {
             }
         }
     })?;
-
-    let config_path = get_config_path()?;
     watcher.watch(&config_path, RecursiveMode::NonRecursive)?;
 
-    load_and_register_hotkeys(&manager, &mut hotkeys_map, &config_path)?;
+    event_loop.run_app(&mut app).unwrap();
 
-    let tray_menu = Menu::new();
-    let quit_item = MenuItem::new("Quit", true, None);
-    tray_menu.append_items(&[&quit_item]);
-
-    let _tray_icon = Some(TrayIconBuilder::new()
-        .with_menu(Box::new(tray_menu))
-        .with_tooltip("Windows Shortcuts")
-        .build()?);
-
-    info!("Listening for hotkeys and config changes...");
-    let hotkey_receiver = GlobalHotKeyEvent::receiver();
-    let tray_event_receiver = TrayEvent::receiver();
-    let menu_event_receiver = MenuEvent::receiver();
-
-    event_loop.run(move |event, elwt| {
-        elwt.set_control_flow(ControlFlow::Wait);
-
-        match event {
-            WinitEvent::UserEvent(UserEvent::ConfigChanged) => {
-                info!("Config file changed. Reloading hotkeys...");
-                let keys_to_unregister: Vec<HotKey> = hotkeys_map.values().map(|(k, _)| *k).collect();
-                if !keys_to_unregister.is_empty() {
-                    if let Err(e) = manager.unregister_all(&keys_to_unregister) {
-                        error!("Failed to unregister all hotkeys: {}", e);
-                    }
-                }
-                hotkeys_map.clear();
-                if let Err(e) = load_and_register_hotkeys(&manager, &mut hotkeys_map, &config_path) {
-                    error!("Failed to reload and register hotkeys: {}", e);
-                }
-            }
-            WinitEvent::AboutToWait => {
-                if let Ok(event) = hotkey_receiver.try_recv() {
-                    if event.state == HotKeyState::Pressed {
-                        if let Some((_, path)) = hotkeys_map.get(&event.id) {
-                            info!("Hotkey {} pressed, opening: {}", event.id, path);
-                            if let Err(e) = open::that(path) {
-                                error!("Failed to open path \'{}\": {}", path, e);
-                            }
-                        }
-                    }
-                }
-                if let Ok(event) = tray_event_receiver.try_recv() {
-                    if let Ok(event) = tray_event_receiver.try_recv() {
-                    info!("Tray event received: {:?}, quit_item id: {:?}", event, quit_item.id());
-                    if event.id == quit_item.id() {
-                        info!("Quit item clicked, exiting application.");
-                        elwt.exit();
-                    }
-                }
-                if let Ok(event) = menu_event_receiver.try_recv() {
-                    info!("Menu event received: {:?}, quit_item id: {:?}", event, quit_item.id());
-                    if event.id == quit_item.id() {
-                        info!("Quit item clicked, exiting application.");
-                        elwt.exit();
-                    }
-                }
-                }
-            }
-            _ => (),
-        }
-    })
-    .context("Event loop failed")
+    Ok(())
 }
 
 fn load_and_register_hotkeys(
