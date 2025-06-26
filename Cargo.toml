@@ -2,6 +2,8 @@
 name = "windows_shortcuts"
 version = "0.0.1"
 edition = "2024"
+description = "Fuck Auto HotKeys"
+license = "MIT"
 
 [dependencies]
 winit = "0.30"
