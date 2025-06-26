@@ -1,26 +1,29 @@
 use anyhow::{anyhow, Context, Result};
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
-use log::{error, info, LevelFilter};
+use log::{debug, error, info, LevelFilter};
 use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
 use open;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use simple_logger::SimpleLogger;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use winit::event_loop::{ControlFlow, EventLoop, ActiveEventLoop};
+use tray_icon::{
+    menu::{Menu, MenuEvent, MenuId, MenuItem},
+    TrayIconBuilder,
+};
 use winit::application::ApplicationHandler;
-use tray_icon::{menu::{Menu, MenuItem, MenuEvent, MenuId}, TrayIconBuilder, TrayIconEvent, Icon};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Serialize)]
 struct Config {
     hotkeys: Vec<HotkeyConfig>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Serialize)]
 struct HotkeyConfig {
     shortcut: String,
     path: String,
@@ -30,8 +33,6 @@ struct HotkeyConfig {
 enum UserEvent {
     ConfigChanged,
 }
-
-
 
 struct App {
     manager: GlobalHotKeyManager,
@@ -45,14 +46,19 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             UserEvent::ConfigChanged => {
                 info!("Config file changed. Reloading hotkeys...");
-                let keys_to_unregister: Vec<HotKey> = self.hotkeys_map.values().map(|(k, _)| *k).collect();
+                let keys_to_unregister: Vec<HotKey> =
+                    self.hotkeys_map.values().map(|(k, _)| *k).collect();
                 if !keys_to_unregister.is_empty() {
                     if let Err(e) = self.manager.unregister_all(&keys_to_unregister) {
                         error!("Failed to unregister all hotkeys: {}", e);
                     }
                 }
                 self.hotkeys_map.clear();
-                if let Err(e) = load_and_register_hotkeys(&self.manager, &mut self.hotkeys_map, &self.config_path) {
+                if let Err(e) = load_and_register_hotkeys(
+                    &self.manager,
+                    &mut self.hotkeys_map,
+                    &self.config_path,
+                ) {
                     error!("Failed to reload and register hotkeys: {}", e);
                 }
             }
@@ -86,15 +92,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
         }
-        if let Ok(event) = TrayIconEvent::receiver().try_recv() {
-            info!("Tray event received: {:?}, quit_item id: {:?}", event, self.quit_item_id);
-            if event.id().0 == self.quit_item_id.0 {
-                info!("Quit item clicked, exiting application.");
-                event_loop.exit();
-            }
-        }
         if let Ok(event) = MenuEvent::receiver().try_recv() {
-            info!("Menu event received: {:?}, quit_item id: {:?}", event, self.quit_item_id);
             if *event.id() == self.quit_item_id {
                 info!("Quit item clicked, exiting application.");
                 event_loop.exit();
@@ -113,10 +111,7 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 fn main() -> Result<()> {
-    SimpleLogger::new()
-        .with_level(LevelFilter::Info)
-        .init()?;
-    info!("Starting application");
+    SimpleLogger::new().with_level(LevelFilter::Info).init()?;
 
     create_startup_shortcut().context("Failed to create startup shortcut")?;
 
@@ -133,7 +128,7 @@ fn main() -> Result<()> {
     let _ = tray_menu.append_items(&[&quit_item]);
 
     let icon_bytes = include_bytes!("../assets/icon.png");
-    
+
     let (icon_rgba, icon_width, icon_height) = {
         let image = image::load_from_memory(icon_bytes)
             .expect("Failed to open icon path")
@@ -142,13 +137,16 @@ fn main() -> Result<()> {
         let rgba = image.into_raw();
         (rgba, width, height)
     };
-    let icon = tray_icon::Icon::from_rgba(icon_rgba, icon_width, icon_height).expect("Failed to open icon");
+    let icon = tray_icon::Icon::from_rgba(icon_rgba, icon_width, icon_height)
+        .expect("Failed to open icon");
 
-    let _tray_icon = Some(TrayIconBuilder::new()
-        .with_menu(Box::new(tray_menu))
-        .with_tooltip("Windows Shortcuts")
-        .with_icon(icon)
-        .build()?);
+    let _tray_icon = Some(
+        TrayIconBuilder::new()
+            .with_menu(Box::new(tray_menu))
+            .with_tooltip("Windows Shortcuts")
+            .with_icon(icon)
+            .build()?,
+    );
 
     info!("Listening for hotkeys and config changes...");
 
@@ -184,14 +182,23 @@ fn load_and_register_hotkeys(
         match HotKey::from_str(&hotkey_config.shortcut) {
             Ok(hotkey) => {
                 if let Err(e) = manager.register(hotkey) {
-                    error!("Failed to register hotkey for shortcut \'{}\": {}", hotkey_config.shortcut, e);
+                    error!(
+                        "Failed to register hotkey for shortcut \'{}\": {}",
+                        hotkey_config.shortcut, e
+                    );
                     continue;
                 }
                 hotkeys_map.insert(hotkey.id(), (hotkey, hotkey_config.path.clone()));
-                info!("Registered hotkey: {} for path {}", hotkey_config.shortcut, hotkey_config.path);
+                info!(
+                    "Registered hotkey: {} for path {}",
+                    hotkey_config.shortcut, hotkey_config.path
+                );
             }
             Err(e) => {
-                error!("Failed to parse shortcut \'{}\": {}", hotkey_config.shortcut, e);
+                error!(
+                    "Failed to parse shortcut \'{}\": {}",
+                    hotkey_config.shortcut, e
+                );
             }
         }
     }
@@ -199,7 +206,8 @@ fn load_and_register_hotkeys(
 }
 
 fn get_config_path() -> Result<PathBuf> {
-    let config_dir = dirs::config_dir().ok_or_else(|| anyhow!("Could not find config directory"))?;
+    let config_dir =
+        dirs::config_dir().ok_or_else(|| anyhow!("Could not find config directory"))?;
     let app_config_dir = config_dir.join("WindowsShortcuts");
     fs::create_dir_all(&app_config_dir).context("Failed to create app config directory")?;
     Ok(app_config_dir.join("config.toml"))
@@ -207,22 +215,35 @@ fn get_config_path() -> Result<PathBuf> {
 
 fn load_or_create_config(config_path: &Path) -> Result<Config> {
     if !config_path.exists() {
-        info!("Config file not found, creating a default one at {:?}", config_path);
-        let default_config_content = r#"
+        info!(
+            "Config file not found, creating a default one at {:?}",
+            config_path
+        );
+        let default_config = Config {
+            hotkeys: vec![
+                HotkeyConfig {
+                    shortcut: "Ctrl+Shift+A".to_string(),
+                    path: "C:/Windows/System32/notepad.exe".to_string(),
+                },
+                HotkeyConfig {
+                    shortcut: "Ctrl+Shift+B".to_string(),
+                    path: "https://www.google.com".to_string(),
+                },
+            ],
+        };
+        let default_config_content = format!(
+            r#"
 # Example hotkeys. Use Ctrl, Shift, Alt, Win as modifiers.
 # Keys can be A-Z, 0-9, F1-F12.
 # For file paths, it is recommended to use forward slashes (e.g., "C:/Users/YourUser/Documents/file.txt")
 # or double backslashes (e.g., "C:\\Users\\YourUser\\Documents\\file.txt").
 
-[[hotkeys]]
-shortcut = "Ctrl+Shift+A"
-path = "C:/Windows/System32/notepad.exe"
-
-[[hotkeys]]
-shortcut = "Ctrl+Shift+B"
-path = "https://www.google.com"
-"#;
-        fs::write(&config_path, default_config_content).context("Failed to write default config")?;
+{}
+"#,
+            toml::to_string_pretty(&default_config).context("Failed to generate config")?
+        );
+        fs::write(&config_path, default_config_content)
+            .context("Failed to write default config")?;
     }
 
     let config_content = fs::read_to_string(&config_path).context("Failed to read config file")?;
@@ -231,11 +252,12 @@ path = "https://www.google.com"
 
 #[cfg(target_os = "windows")]
 fn create_startup_shortcut() -> Result<()> {
+    use shortcuts_rs::ShellLink;
     use std::env;
-use shortcuts_rs::ShellLink;
 
     let app_exe = env::current_exe().context("Failed to get current executable path")?;
-    let app_name = app_exe.file_stem()
+    let app_name = app_exe
+        .file_stem()
         .and_then(|s| s.to_str())
         .context("Failed to get app name")?;
 
@@ -256,7 +278,7 @@ use shortcuts_rs::ShellLink;
         let shortcut = ShellLink::new(&app_exe, None, None, None)?;
         shortcut.create_lnk(&shortcut_path)?;
     } else {
-        info!("Startup shortcut already exists at {:?}", shortcut_path);
+        debug!("Startup shortcut already exists at {:?}", shortcut_path);
     }
 
     Ok(())
@@ -264,6 +286,8 @@ use shortcuts_rs::ShellLink;
 
 #[cfg(not(target_os = "windows"))]
 fn create_startup_shortcut() -> Result<()> {
-    info!("Startup shortcut creation is only supported on Windows.");
+    use log::warn;
+
+    warn!("Startup shortcut creation is only supported on Windows.");
     Ok(())
 }
