@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use winit::event::Event as WinitEvent;
 use winit::event_loop::{ControlFlow, EventLoopBuilder};
+use tray_icon::{menu::{Menu, MenuItem, MenuEvent}, TrayIconBuilder, TrayEvent};
 
 #[derive(Debug, Deserialize, Clone)]
 struct Config {
@@ -35,6 +36,8 @@ fn main() -> Result<()> {
         .init()?;
     info!("Starting application");
 
+    create_startup_shortcut().context("Failed to create startup shortcut")?;
+
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     let manager = GlobalHotKeyManager::new().context("Failed to create hotkey manager")?;
@@ -53,8 +56,19 @@ fn main() -> Result<()> {
 
     load_and_register_hotkeys(&manager, &mut hotkeys_map, &config_path)?;
 
+    let tray_menu = Menu::new();
+    let quit_item = MenuItem::new("Quit", true, None);
+    tray_menu.append_items(&[&quit_item]);
+
+    let _tray_icon = Some(TrayIconBuilder::new()
+        .with_menu(Box::new(tray_menu))
+        .with_tooltip("Windows Shortcuts")
+        .build()?);
+
     info!("Listening for hotkeys and config changes...");
     let hotkey_receiver = GlobalHotKeyEvent::receiver();
+    let tray_event_receiver = TrayEvent::receiver();
+    let menu_event_receiver = MenuEvent::receiver();
 
     event_loop.run(move |event, elwt| {
         elwt.set_control_flow(ControlFlow::Wait);
@@ -83,6 +97,22 @@ fn main() -> Result<()> {
                             }
                         }
                     }
+                }
+                if let Ok(event) = tray_event_receiver.try_recv() {
+                    if let Ok(event) = tray_event_receiver.try_recv() {
+                    info!("Tray event received: {:?}, quit_item id: {:?}", event, quit_item.id());
+                    if event.id == quit_item.id() {
+                        info!("Quit item clicked, exiting application.");
+                        elwt.exit();
+                    }
+                }
+                if let Ok(event) = menu_event_receiver.try_recv() {
+                    info!("Menu event received: {:?}, quit_item id: {:?}", event, quit_item.id());
+                    if event.id == quit_item.id() {
+                        info!("Quit item clicked, exiting application.");
+                        elwt.exit();
+                    }
+                }
                 }
             }
             _ => (),
@@ -144,4 +174,43 @@ path = "https://www.google.com"
 
     let config_content = fs::read_to_string(&config_path).context("Failed to read config file")?;
     toml::from_str(&config_content).context("Failed to parse TOML config")
+}
+
+#[cfg(target_os = "windows")]
+fn create_startup_shortcut() -> Result<()> {
+    use std::env;
+use shortcuts_rs::ShellLink;
+
+    let app_exe = env::current_exe().context("Failed to get current executable path")?;
+    let app_name = app_exe.file_stem()
+        .and_then(|s| s.to_str())
+        .context("Failed to get app name")?;
+
+    let startup_dir = dirs::config_dir()
+        .ok_or_else(|| anyhow!("Could not find config directory"))?
+        .join("Microsoft")
+        .join("Windows")
+        .join("Start Menu")
+        .join("Programs")
+        .join("Startup");
+
+    fs::create_dir_all(&startup_dir).context("Failed to create startup directory")?;
+
+    let shortcut_path = startup_dir.join(format!("{}.lnk", app_name));
+
+    if !shortcut_path.exists() {
+        info!("Creating startup shortcut at {:?}", shortcut_path);
+        let shortcut = ShellLink::new(&app_exe, None, None, None)?;
+        shortcut.create_lnk(&shortcut_path)?;
+    } else {
+        info!("Startup shortcut already exists at {:?}", shortcut_path);
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn create_startup_shortcut() -> Result<()> {
+    info!("Startup shortcut creation is only supported on Windows.");
+    Ok(())
 }
