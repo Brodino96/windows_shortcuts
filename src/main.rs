@@ -132,8 +132,17 @@ fn main() -> Result<()> {
     let quit_item_id = quit_item.id();
     let _ = tray_menu.append_items(&[&quit_item]);
 
-    let icon_bytes = include_bytes!("../assets/icon.ico");
-    let icon = Icon::from_buffer(icon_bytes.to_vec()).context("Failed to create icon from bytes")?;
+    let icon_bytes = include_bytes!("../assets/icon.png");
+    
+    let (icon_rgba, icon_width, icon_height) = {
+        let image = image::load_from_memory(icon_bytes)
+            .expect("Failed to open icon path")
+            .into_rgba8();
+        let (width, height) = image.dimensions();
+        let rgba = image.into_raw();
+        (rgba, width, height)
+    };
+    let icon = tray_icon::Icon::from_rgba(icon_rgba, icon_width, icon_height).expect("Failed to open icon");
 
     let _tray_icon = Some(TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu))
