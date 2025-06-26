@@ -1,6 +1,6 @@
 [package]
 name = "windows_shortcuts"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 
 [dependencies]
@@ -23,3 +23,6 @@ parking_lot = "0.12.1"
 tray-icon = "0.21.0"
 shortcuts-rs = "1.1.1"
 image = "0.25.6"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1.12"
